@@ -76,6 +76,8 @@ __global__ void updatepartpos(int npart,float dt,float Eh,float * dd_rand,float 
 	
 	float Ux=0.0f;
 	float Vx=0.0f;
+	float Xd=0.0f; //Diffusion term
+	float Yd=0.0f;
 	
 	float distu, distv;
 	
@@ -94,8 +96,16 @@ __global__ void updatepartpos(int npart,float dt,float Eh,float * dd_rand,float 
     distu=tex2D(texdXU, xxx, yyy);
     distv=tex2D(texdYV, xxx+0.5, yyy-0.5);
     
-  	xx[i]=xxx+(Ux*dt+(dd_rand[i]*2-1)*sqrtf(6*Eh*dt))/distu;
-	yy[i]=yyy+(Vx*dt+(dd_rand[npart-i]*2-1)*sqrtf(6*Eh*dt))/distv;
+    // old formulation
+    //Xd=(dd_rand[i]*2-1)*sqrtf(6*Eh*dt);
+    //Yd=(dd_rand[npart-i]*2-1)*sqrtf(6*Eh*dt);
+    
+    //formulation used in Viikmae
+    Xd=sqrtf(-4*Eh*dt*logf(1-dd_rand[i]))*cosf(2*pi*dd_rand[npart-i]);
+    Yd=sqrtf(-4*Eh*dt*logf(1-dd_rand[i]))*sinf(2*pi*dd_rand[npart-i]);
+    
+  	xx[i]=xxx+(Ux*dt+Xd)/distu;
+	yy[i]=yyy+(Vx*dt+Yd)/distv;
 	}
 	tt[i]=ttt+dt;
 	

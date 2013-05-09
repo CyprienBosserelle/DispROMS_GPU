@@ -138,7 +138,7 @@ void runCuda(void)
 	dim3 blockDimHD(16, 1, 1);
 	dim3 gridDimHD(ceil(max(netau,netav)*max(nxiu,nxiv) / blockDimHD.x), 1, 1);
 		
-	if(stp*dt>=hddt*hdstep)
+	if(stp*dt>=hddt*(hdstep-hdstart+1))//Not sure about the +1
 	{
 	  //Read next step
 	  
@@ -162,10 +162,11 @@ void runCuda(void)
 	  
     }
     
-    HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nu,stp,backswitch,hdstep,dt,hddt/*,Umask_g*/,Uo_g,Un_g,Ux_g);
+    int interpstep=hdstep-hdstart+1;
+    HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nu,stp,backswitch,interpstep,dt,hddt/*,Umask_g*/,Uo_g,Un_g,Ux_g);
 	CUDA_CHECK( cudaThreadSynchronize() );
 	
-	HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nv,stp,backswitch,hdstep,dt,hddt/*,Vmask_g*/,Vo_g,Vn_g,Vx_g);
+	HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nv,stp,backswitch,interpstep,dt,hddt/*,Vmask_g*/,Vo_g,Vn_g,Vx_g);
 	CUDA_CHECK( cudaThreadSynchronize() );
 	  
 	CUDA_CHECK( cudaMemcpyToArray( Ux_gp, 0, 0, Ux_g, data_nu* sizeof(float), cudaMemcpyDeviceToDevice));
