@@ -1,0 +1,14 @@
+!!DISP_G3_OPERATIONAL_FILE
+ocean_ausnwsrstwq2.nc                 Bathymetry_filename
+3600                    HD_model_output_timestep_[s]
+24			HD_level
+1,0			HD_start,stop
+512                    Number_of_particle_to_release
+600                      Dispersal_model_timestep_[s]
+0.1                    Horizontal_Eddy_Diffusivity_[m^2.s^-2]
+0.1                     Vertical_Eddy_Diffusivity_[m^2/s^2]
+0.0			Minimum_depth_for_Random_walk[m]
+115.1,-32.0                Center_of_release_(x[m],y[m])
+500000,500000                 release_size_(Width[m],height[m])
+seed    		seed_file_(x,y,z,triangle_ref)___F:\Users\bosserel\Documents\Work\Geographe\seed.dat
+                               
