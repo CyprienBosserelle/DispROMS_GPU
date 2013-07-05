@@ -31,6 +31,9 @@
 
 #include <math.h>
 
+// includes, GL
+#include <GL/glew.h> 
+#include <GL/glut.h>
 
 #include <cuda_gl_interop.h>
 #include <vector_types.h>
@@ -41,6 +44,7 @@
 #include "DispROMS_kernel.cu"
 
 char ncfile[256];
+char ncoutfile[256];
 
 int nxiu,nxiv,netau,netav,nl,nt; 
 
@@ -50,6 +54,9 @@ float *Uo_g,*Un_g,*Ux_g;
 float *Vo_g,*Vn_g,*Vx_g;
 float *Umask, *Vmask, *Umask_g, *Vmask_g;
 
+float *Nincel,*cNincel,*cTincel;
+float *Nincel_g,*cNincel_g,*cTincel_g;
+
 float *distXU, *distYU, *distXV, *distYV;
 
 float *lat_u,*lon_u,*lat_v,*lon_v;
@@ -58,7 +65,7 @@ int hdstep,hdstart,hdend;
 int lev;
 
 float hddt;
-int stp,outstep,nextoutstep;
+int stp,outstep,nextoutstep,outtype;
 
 
 float *xp,*yp,*zp,*tp;
@@ -69,6 +76,8 @@ float *xl_g,*yl_g;
 //particle properties
 int npart,backswitch;
 float dt,Eh,Ev,minrwdepth;
+
+int GPUDEV=0;
 
 int SEED = 777;
 float * d_Rand; //GPU random number
@@ -108,6 +117,9 @@ void readHDstep(char ncfile[],int nxiu,int nxiv,int netau,int netav,int nl,int n
 void readlatlon(char ncfile[],int nxiu,int nxiv,int netau,int netav,float *&lat_u,float *&lon_u,float *&lat_v,float *&lon_v);
 void readUVmask(char ncfile[],int nxiu,int nxiv,int netau,int netav,float *&Uo,float *&Vo);
 
+void creatncfile(char outfile[], int nx,int ny,float *xval, float *yval,float totaltime,float *Nincel,float *cNincel,float *cTincel);
+void writestep2nc(char outfile[], int nx,int ny,float totaltime,float *Nincel,float *cNincel,float * cTincel);
+
 template <class T> const T& min (const T& a, const T& b);
 template <class T> const T& max (const T& a, const T& b);
 template <class T> const T& round(const T& a);
@@ -136,9 +148,9 @@ void runCuda(void)
 	float data_nu=netau*nxiu;
 	float data_nv=netav*nxiv; 
 	dim3 blockDimHD(16, 1, 1);
-	dim3 gridDimHD(ceil(max(netau,netav)*max(nxiu,nxiv) / blockDimHD.x), 1, 1);
+	dim3 gridDimHD(ceil(max(netau,netav)*max(nxiu,nxiv) / (float)blockDimHD.x), 1, 1);
 		
-	if(stp*dt>=hddt*hdstep)
+	if(stp*dt>=hddt*(hdstep-hdstart+1))//Not sure about the +1
 	{
 	  //Read next step
 	  
@@ -161,11 +173,15 @@ void runCuda(void)
 	  CUDA_CHECK( cudaMemcpy(Vn_g, Vn, data_nv*sizeof(float ), cudaMemcpyHostToDevice) );
 	  
     }
+
+	ResetNincel<<<gridDimHD, blockDimHD, 0>>>(data_nu,Nincel_g);
+	CUDA_CHECK( cudaThreadSynchronize() );
     
-    HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nu,stp,backswitch,hdstep,dt,hddt/*,Umask_g*/,Uo_g,Un_g,Ux_g);
+    int interpstep=hdstep-hdstart+1;
+    HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nu,stp,backswitch,interpstep,dt,hddt/*,Umask_g*/,Uo_g,Un_g,Ux_g);
 	CUDA_CHECK( cudaThreadSynchronize() );
 	
-	HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nv,stp,backswitch,hdstep,dt,hddt/*,Vmask_g*/,Vo_g,Vn_g,Vx_g);
+	HD_interp<<<gridDimHD, blockDimHD, 0>>>(data_nv,stp,backswitch,interpstep,dt,hddt/*,Vmask_g*/,Vo_g,Vn_g,Vx_g);
 	CUDA_CHECK( cudaThreadSynchronize() );
 	  
 	CUDA_CHECK( cudaMemcpyToArray( Ux_gp, 0, 0, Ux_g, data_nu* sizeof(float), cudaMemcpyDeviceToDevice));
@@ -190,7 +206,9 @@ void runCuda(void)
 	
 	ij2lonlat<<<gridDim, blockDim, 0>>>(npart,xl_g,yl_g,xp_g,yp_g);
 	CUDA_CHECK( cudaThreadSynchronize() );   
-	 
+	
+	CalcNincel<<<gridDim, blockDim, 0>>>(npart,nxiu,netau,xl_g, yl_g,tp_g,Nincel_g,cNincel_g,cTincel_g);
+	CUDA_CHECK( cudaThreadSynchronize() );
 		
 }
 
@@ -223,6 +241,7 @@ int main(int argc, char **argv)
     fop=fopen(opfile,"r");
 	
 	fscanf(fop,"%*s %s\t%*s",&ncfile);
+	fscanf(fop,"%d\t%*s",&GPUDEV);
 	fscanf(fop,"%f\t%*s",&hddt);
 	fscanf(fop,"%d\t%*s",&lev);
 	fscanf(fop,"%d,%d\t%*s",&hdstart,&hdend);
@@ -235,7 +254,9 @@ int main(int argc, char **argv)
 	fscanf(fop,"%f,%f\t%*s",&xcenter,&ycenter);
     fscanf(fop,"%f,%f\t%*s",&LL,&HH);
 	fscanf(fop,"%s\t%*s",&seedfile);
+	fscanf(fop,"%d\t%*s",&outtype);
 	fscanf(fop,"%d\t%*s",&outstep);
+	fscanf(fop,"%s\t%*s",&ncoutfile);
 	fclose(fop);
 	
 	printf(" ncfile:%s\n Hddt:%f\t lev:%d\n Hdstart:%d \t Hdstop:%d\n npart:%d\n dt:%f\n Eh:%f\t Ev:%f\n Mindepth:%f\n Xcenter:%f\t Ycenter:%f\n LL:%f\t HH:%f\n Seed file:%s\n",ncfile,hddt,lev,hdstart,hdend,npart,dt,Eh,Ev,minrwdepth,xcenter,ycenter,LL,HH,seedfile);
@@ -277,6 +298,23 @@ int main(int argc, char **argv)
 	tp = (float *)malloc(npart*sizeof(float));
 	xl = (float *)malloc(npart*sizeof(float));
 	yl = (float *)malloc(npart*sizeof(float));
+
+
+		//Nincel
+	Nincel= (float *)malloc(nxiu*netau*sizeof(float ));
+	cNincel= (float *)malloc(nxiu*netau*sizeof(float ));
+	cTincel= (float *)malloc(nxiu*netau*sizeof(float ));
+
+
+	for (int i=0; i<nxiu; i++)
+	{
+		for (int j=0; j<netau; j++)
+		{
+			Nincel[i+j*nxiu]=0.0f;
+		}
+	}
+
+
 	printf("...done\n");
 	
 	
@@ -532,7 +570,7 @@ int main(int argc, char **argv)
 	//Prepare GPU
 	////////////////////////////
 	// Init GPU data
-	int GPUDEVICE=1;
+	int GPUDEVICE=GPUDEV;
 	CUDA_CHECK(cudaSetDevice(GPUDEVICE));
 	
 	
@@ -560,6 +598,10 @@ int main(int argc, char **argv)
 	CUDA_CHECK(cudaMalloc((void **)&Vo_g, netav*nxiv* sizeof(float)));
 	CUDA_CHECK(cudaMalloc((void **)&Vn_g, netav*nxiv* sizeof(float)));
 	CUDA_CHECK(cudaMalloc((void **)&Vx_g, netav*nxiv* sizeof(float)));
+
+	CUDA_CHECK(cudaMalloc((void **)&Nincel_g, netau*nxiu* sizeof(float)));
+	CUDA_CHECK(cudaMalloc((void **)&cNincel_g, netau*nxiu* sizeof(float)));
+	CUDA_CHECK(cudaMalloc((void **)&cTincel_g, netau*nxiu* sizeof(float)));
 	
 	CUDA_CHECK(cudaMalloc((void **)&Umask_g, netau*nxiu* sizeof(float)));
 	CUDA_CHECK(cudaMalloc((void **)&Vmask_g, netav*nxiv* sizeof(float)));
@@ -577,6 +619,10 @@ int main(int argc, char **argv)
 	
 	CUDA_CHECK( cudaMemcpy(Umask_g, Umask, netau*nxiu*sizeof(float ), cudaMemcpyHostToDevice) );
 	CUDA_CHECK( cudaMemcpy(Vmask_g, Vmask, netav*nxiv*sizeof(float ), cudaMemcpyHostToDevice) );
+
+	CUDA_CHECK( cudaMemcpy(Nincel_g, Nincel, netau*nxiu*sizeof(float ), cudaMemcpyHostToDevice) );
+	CUDA_CHECK( cudaMemcpy(cNincel_g, Nincel, netau*nxiu*sizeof(float ), cudaMemcpyHostToDevice) );
+	CUDA_CHECK( cudaMemcpy(cTincel_g, Nincel, netau*nxiu*sizeof(float ), cudaMemcpyHostToDevice) );
 	
 	CUDA_CHECK( cudaMemcpy(xp_g, xp, npart*sizeof(float ), cudaMemcpyHostToDevice) );
 	CUDA_CHECK( cudaMemcpy(yp_g, yp, npart*sizeof(float ), cudaMemcpyHostToDevice) );
@@ -677,6 +723,8 @@ int main(int argc, char **argv)
     char fileoutn[15];
     sprintf (fileoutn, "Part_%d.xyz", stp);
     writexyz(xp,yp,zp,tp,xl,yl,npart,fileoutn);
+
+	creatncfile(ncoutfile,nxiu,netau,lon_u,lat_u,stp*dt,Nincel,Nincel,Nincel);
     
     printf("Running Model...\n");
     
@@ -687,19 +735,58 @@ int main(int argc, char **argv)
 		
 		if (stp==nextoutstep)
 	 {
-	 char fileoutn[15];
-	 nextoutstep=nextoutstep+outstep;
-	 sprintf (fileoutn, "Part_%d.xyz", stp);
+		 char fileoutn[15];
+		 nextoutstep=nextoutstep+outstep;
+		 switch (outtype)
+		 {
+		 case 1:
+			 
+			 
+			 sprintf (fileoutn, "Part_%d.xyz", stp);
 	 
-	 //Get the results to plot.
-	 CUDA_CHECK( cudaMemcpy(xp, xp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
-	 CUDA_CHECK( cudaMemcpy(yp, yp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
-	 //CUDA_CHECK( cudaMemcpy(zp, zp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
-	 CUDA_CHECK( cudaMemcpy(tp, tp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
-	 CUDA_CHECK( cudaMemcpy(xl, xl_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
-	 CUDA_CHECK( cudaMemcpy(yl, yl_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
-	 //printf("saving Part_%d.xyz file", stp);
-	 writexyz(xp,yp,zp,tp,xl,yl,npart,fileoutn);
+			 //Get the results to plot.
+			 CUDA_CHECK( cudaMemcpy(xp, xp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(yp, yp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 //CUDA_CHECK( cudaMemcpy(zp, zp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(tp, tp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(xl, xl_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(yl, yl_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 //printf("saving Part_%d.xyz file", stp);
+			 writexyz(xp,yp,zp,tp,xl,yl,npart,fileoutn);
+			 break;
+
+		 case 2:
+
+			 CUDA_CHECK( cudaMemcpy(Nincel, Nincel_g, nxiu*netau*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(cNincel, cNincel_g, nxiu*netau*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(cTincel, cTincel_g, nxiu*netau*sizeof(float), cudaMemcpyDeviceToHost) );
+	 
+			 writestep2nc(ncoutfile,nxiu,netau,stp*dt,Nincel,cNincel,cTincel);
+			 break;
+
+		 case 3:
+
+			 sprintf (fileoutn, "Part_%d.xyz", stp);
+	 
+			 //Get the results to plot.
+			 CUDA_CHECK( cudaMemcpy(xp, xp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(yp, yp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 //CUDA_CHECK( cudaMemcpy(zp, zp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(tp, tp_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(xl, xl_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(yl, yl_g, npart*sizeof(float), cudaMemcpyDeviceToHost) );
+			 //printf("saving Part_%d.xyz file", stp);
+			 writexyz(xp,yp,zp,tp,xl,yl,npart,fileoutn);
+
+
+			 CUDA_CHECK( cudaMemcpy(Nincel, Nincel_g, nxiu*netau*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(cNincel, cNincel_g, nxiu*netau*sizeof(float), cudaMemcpyDeviceToHost) );
+			 CUDA_CHECK( cudaMemcpy(cTincel, cTincel_g, nxiu*netau*sizeof(float), cudaMemcpyDeviceToHost) );
+	 
+			 writestep2nc(ncoutfile,nxiu,netau,stp*dt,Nincel,cNincel,cTincel);
+			 break;
+		 }
+
 	 
 	 }
 	 
